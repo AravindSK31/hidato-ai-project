@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Card,
@@ -9,7 +9,13 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { RotateCcw, Shuffle, CheckCircle2 } from "lucide-react";
+import {
+  RotateCcw,
+  Shuffle,
+  CheckCircle2,
+  Bot,
+  Loader2,
+} from "lucide-react";
 
 type CellValue = number | null;
 type HexGrid = CellValue[][];
@@ -22,6 +28,32 @@ type PuzzleConfig = {
   overlap: number;
 };
 
+type SolveApiResponse = {
+  success: boolean;
+  solved_grid: HexGrid | null;
+  runtime_seconds: number;
+  nodes_expanded: number;
+  backtracks: number;
+  message: string;
+};
+
+type GenerateApiResponse = {
+  difficulty: string;
+  puzzle_grid: HexGrid;
+  solution_grid: HexGrid;
+  clue_count: number;
+  solvable: boolean;
+  message: string;
+};
+
+type SolverMetrics = {
+  runtime_seconds: number;
+  nodes_expanded: number;
+  backtracks: number;
+} | null;
+
+type SolverMethod = "dfs" | "csp" | null;
+
 const puzzles: Record<"Easy" | "Medium" | "Hard", PuzzleConfig> = {
   Easy: {
     name: "Easy",
@@ -29,11 +61,11 @@ const puzzles: Record<"Easy" | "Medium" | "Hard", PuzzleConfig> = {
     cellHeight: 70,
     overlap: 18,
     grid: [
-      [null, 3, null],
-      [1, null, 5, null],
-      [null, null, null, 7, null],
-      [null, 9, null, null],
-      [null, 11, null],
+      [1, null, 3],
+      [12, null, null, 4],
+      [null, null, null, 15, 5],
+      [10, null, 16, null],
+      [null, 8, 7],
     ],
   },
   Medium: {
@@ -113,7 +145,11 @@ function randomizeBoard(baseGrid: HexGrid, givenMask: boolean[][]): HexGrid {
   );
 }
 
-function getAdjacentCoords(grid: HexGrid, r: number, c: number): Array<[number, number]> {
+function getAdjacentCoords(
+  grid: HexGrid,
+  r: number,
+  c: number
+): Array<[number, number]> {
   const neighbors: Array<[number, number]> = [];
   const currentLen = grid[r].length;
 
@@ -158,7 +194,11 @@ function getAdjacentCoords(grid: HexGrid, r: number, c: number): Array<[number, 
   return Array.from(unique.values());
 }
 
-function isHexAdjacent(grid: HexGrid, a: [number, number], b: [number, number]): boolean {
+function isHexAdjacent(
+  grid: HexGrid,
+  a: [number, number],
+  b: [number, number]
+): boolean {
   const neighbors = getAdjacentCoords(grid, a[0], a[1]);
   return neighbors.some(([nr, nc]) => nr === b[0] && nc === b[1]);
 }
@@ -230,23 +270,56 @@ function getCellStyle(
 
 export default function HidatoFrontendApp() {
   const [difficulty, setDifficulty] = useState<"Easy" | "Medium" | "Hard">("Easy");
-
-  const puzzle = useMemo(() => puzzles[difficulty], [difficulty]);
   const [grid, setGrid] = useState<HexGrid>(cloneGrid(puzzles.Easy.grid));
+  const [basePuzzleGrid, setBasePuzzleGrid] = useState<HexGrid>(
+    cloneGrid(puzzles.Easy.grid)
+  );
   const [status, setStatus] = useState<string>(
     "Fill the board so consecutive numbers touch through hex neighbors."
   );
+  const [solverLoading, setSolverLoading] = useState(false);
+  const [generatorLoading, setGeneratorLoading] = useState(false);
+  const [solverMetrics, setSolverMetrics] = useState<SolverMetrics>(null);
+  const [activeSolver, setActiveSolver] = useState<SolverMethod>(null);
 
-  const givenMask = useMemo(() => getGivenMask(puzzle.grid), [puzzle]);
-  const totalPlayable = useMemo(() => getExpectedRange(puzzle.grid), [puzzle]);
+  const puzzle = useMemo(() => puzzles[difficulty], [difficulty]);
+  const givenMask = useMemo(() => getGivenMask(basePuzzleGrid), [basePuzzleGrid]);
+  const totalPlayable = useMemo(() => getExpectedRange(basePuzzleGrid), [basePuzzleGrid]);
   const filledCount = countFilled(grid);
   const duplicateWarning = hasDuplicates(grid);
 
-  const loadDifficulty = (level: "Easy" | "Medium" | "Hard") => {
-    setDifficulty(level);
-    setGrid(cloneGrid(puzzles[level].grid));
-    setStatus(`${level} puzzle loaded.`);
+  const loadDifficulty = async (level: "Easy" | "Medium" | "Hard") => {
+    try {
+      setGeneratorLoading(true);
+      setStatus(`Generating ${level} puzzle...`);
+      setSolverMetrics(null);
+      setActiveSolver(null);
+
+      const response = await fetch(
+        `http://127.0.0.1:8000/generate?difficulty=${level.toLowerCase()}`
+      );
+
+      const data: GenerateApiResponse = await response.json();
+
+      if (data.solvable && data.puzzle_grid && data.puzzle_grid.length > 0) {
+        setDifficulty(level);
+        setBasePuzzleGrid(cloneGrid(data.puzzle_grid));
+        setGrid(cloneGrid(data.puzzle_grid));
+        setStatus(data.message || `${level} puzzle generated.`);
+      } else {
+        setStatus(data.message || `Could not generate ${level} puzzle.`);
+      }
+    } catch (error) {
+      console.error("Backend generator error:", error);
+      setStatus("Could not connect to backend generator. Make sure FastAPI is running.");
+    } finally {
+      setGeneratorLoading(false);
+    }
   };
+
+  useEffect(() => {
+    loadDifficulty("Easy");
+  }, []);
 
   const handleCellChange = (r: number, c: number, raw: string) => {
     const value: CellValue = raw === "" ? null : Number(raw);
@@ -260,18 +333,75 @@ export default function HidatoFrontendApp() {
   };
 
   const resetBoard = () => {
-    setGrid(cloneGrid(puzzle.grid));
+    setGrid(cloneGrid(basePuzzleGrid));
+    setSolverMetrics(null);
+    setActiveSolver(null);
     setStatus(`${difficulty} puzzle reset.`);
   };
 
   const fillDemo = () => {
-    setGrid(randomizeBoard(puzzle.grid, givenMask));
+    setGrid(randomizeBoard(basePuzzleGrid, givenMask));
+    setSolverMetrics(null);
+    setActiveSolver(null);
     setStatus("Demo fill applied. This is only for UI testing, not a real solution.");
   };
 
   const checkBoard = () => {
     const result = validateHidato(grid);
     setStatus(result.message);
+  };
+
+  const solveWithMethod = async (method: "dfs" | "csp") => {
+    setSolverLoading(true);
+    setActiveSolver(method);
+    setStatus(
+      method === "dfs"
+        ? "Solving puzzle using DFS backtracking..."
+        : "Solving puzzle using CSP with propagation..."
+    );
+    setSolverMetrics(null);
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/solve", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          grid,
+          method,
+        }),
+      });
+
+      const data: SolveApiResponse = await response.json();
+
+      if (data.success && data.solved_grid) {
+        setGrid(data.solved_grid);
+        setSolverMetrics({
+          runtime_seconds: data.runtime_seconds,
+          nodes_expanded: data.nodes_expanded,
+          backtracks: data.backtracks,
+        });
+        setStatus(
+          data.message ||
+            (method === "dfs"
+              ? "Puzzle solved successfully with DFS."
+              : "Puzzle solved successfully with CSP.")
+        );
+      } else {
+        setStatus(
+          data.message ||
+            (method === "dfs"
+              ? "DFS could not solve this puzzle."
+              : "CSP could not solve this puzzle.")
+        );
+      }
+    } catch (error) {
+      console.error("Backend solver error:", error);
+      setStatus("Could not connect to backend solver. Make sure FastAPI is running.");
+    } finally {
+      setSolverLoading(false);
+    }
   };
 
   return (
@@ -298,6 +428,7 @@ export default function HidatoFrontendApp() {
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button
                     onClick={() => loadDifficulty("Easy")}
+                    disabled={generatorLoading || solverLoading}
                     variant={difficulty === "Easy" ? "default" : "outline"}
                     className={`rounded-full px-5 ${
                       difficulty === "Easy"
@@ -309,6 +440,7 @@ export default function HidatoFrontendApp() {
                   </Button>
                   <Button
                     onClick={() => loadDifficulty("Medium")}
+                    disabled={generatorLoading || solverLoading}
                     variant={difficulty === "Medium" ? "default" : "outline"}
                     className={`rounded-full px-5 ${
                       difficulty === "Medium"
@@ -320,6 +452,7 @@ export default function HidatoFrontendApp() {
                   </Button>
                   <Button
                     onClick={() => loadDifficulty("Hard")}
+                    disabled={generatorLoading || solverLoading}
                     variant={difficulty === "Hard" ? "default" : "outline"}
                     className={`rounded-full px-5 ${
                       difficulty === "Hard"
@@ -334,12 +467,14 @@ export default function HidatoFrontendApp() {
                 <div className="mt-4 flex flex-wrap gap-3">
                   <Button
                     onClick={resetBoard}
+                    disabled={generatorLoading || solverLoading}
                     className="rounded-full bg-amber-100 text-stone-900 hover:bg-white"
                   >
                     <RotateCcw className="mr-2 h-4 w-4" /> Reset
                   </Button>
                   <Button
                     onClick={fillDemo}
+                    disabled={generatorLoading || solverLoading}
                     variant="secondary"
                     className="rounded-full bg-stone-700 text-stone-100 hover:bg-stone-600"
                   >
@@ -347,10 +482,45 @@ export default function HidatoFrontendApp() {
                   </Button>
                   <Button
                     onClick={checkBoard}
+                    disabled={generatorLoading || solverLoading}
                     variant="outline"
                     className="rounded-full border-amber-700/60 bg-transparent text-amber-100 hover:bg-amber-900/30"
                   >
                     <CheckCircle2 className="mr-2 h-4 w-4" /> Check Board
+                  </Button>
+                  <Button
+                    onClick={() => solveWithMethod("dfs")}
+                    disabled={solverLoading || generatorLoading}
+                    className="rounded-full bg-emerald-500 text-white hover:bg-emerald-400 disabled:opacity-70"
+                  >
+                    {solverLoading && activeSolver === "dfs" ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Solving DFS...
+                      </>
+                    ) : (
+                      <>
+                        <Bot className="mr-2 h-4 w-4" />
+                        Solve with DFS
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    onClick={() => solveWithMethod("csp")}
+                    disabled={solverLoading || generatorLoading}
+                    className="rounded-full bg-sky-500 text-white hover:bg-sky-400 disabled:opacity-70"
+                  >
+                    {solverLoading && activeSolver === "csp" ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Solving CSP...
+                      </>
+                    ) : (
+                      <>
+                        <Bot className="mr-2 h-4 w-4" />
+                        Solve with CSP
+                      </>
+                    )}
                   </Button>
                 </div>
               </CardHeader>
@@ -463,13 +633,34 @@ export default function HidatoFrontendApp() {
 
             <Card className="rounded-[26px] border border-amber-900/25 bg-[linear-gradient(180deg,rgba(55,35,24,0.96)_0%,rgba(25,18,14,0.98)_100%)] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
               <CardHeader>
+                <CardTitle className="text-xl text-amber-50">
+                  {activeSolver
+                    ? `${activeSolver.toUpperCase()} Solver Metrics`
+                    : "Solver Metrics"}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 text-amber-100/85 leading-7">
+                {solverMetrics ? (
+                  <>
+                    <p>Runtime: {solverMetrics.runtime_seconds.toFixed(6)} seconds</p>
+                    <p>Nodes Expanded: {solverMetrics.nodes_expanded}</p>
+                    <p>Backtracks: {solverMetrics.backtracks}</p>
+                  </>
+                ) : (
+                  <p>No solver run yet. Click “Solve with DFS” or “Solve with CSP” to view metrics.</p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-[26px] border border-amber-900/25 bg-[linear-gradient(180deg,rgba(55,35,24,0.96)_0%,rgba(25,18,14,0.98)_100%)] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
+              <CardHeader>
                 <CardTitle className="text-xl text-amber-50">Difficulty Notes</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-amber-100/85 leading-7">
                 <p>Easy: smaller board, more guided clues.</p>
                 <p>Medium: wider board with fewer fixed numbers.</p>
                 <p>Hard: larger board and sparser clues.</p>
-                <p>Later we can compare solver runtime across all 3 levels.</p>
+                <p>Analysis comparisons across all algorithms can go on a separate page.</p>
               </CardContent>
             </Card>
           </motion.div>
