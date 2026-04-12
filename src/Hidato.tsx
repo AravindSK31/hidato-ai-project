@@ -42,7 +42,11 @@ type GenerateApiResponse = {
   puzzle_grid: HexGrid;
   solution_grid: HexGrid;
   clue_count: number;
+  clue_ratio: number;
   solvable: boolean;
+  board_size: string;
+  board_shape: number[];
+  clue_pattern: string;
   message: string;
 };
 
@@ -52,7 +56,13 @@ type SolverMetrics = {
   backtracks: number;
 } | null;
 
-type SolverMethod = "dfs" | "csp" | null;
+type SolverMethod =
+  | "dfs"
+  | "dfs_heuristic"
+  | "astar"
+  | "csp"
+  | "ga"
+  | null;
 
 const puzzles: Record<"Easy" | "Medium" | "Hard", PuzzleConfig> = {
   Easy: {
@@ -240,7 +250,10 @@ function validateHidato(grid: HexGrid): { ok: boolean; message: string } {
     }
 
     if (!isHexAdjacent(grid, current, next)) {
-      return { ok: false, message: `${i} and ${i + 1} are not adjacent on the hex board.` };
+      return {
+        ok: false,
+        message: `${i} and ${i + 1} are not adjacent on the hex board.`,
+      };
     }
   }
 
@@ -259,13 +272,45 @@ function getCellStyle(
     WebkitClipPath:
       "polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0% 50%)",
     background: given
-      ? "linear-gradient(180deg, #fde68a 0%, #fbbf24 100%)"
-      : "linear-gradient(180deg, #fffdf6 0%, #f5efe1 100%)",
-    border: given ? "2px solid #7c5a10" : "2px solid #8b7355",
+      ? "linear-gradient(180deg, #d9b56b 0%, #b98635 100%)"
+      : "linear-gradient(180deg, #eadcc2 0%, #d7c3a0 100%)",
+    border: given ? "2px solid #6a4716" : "2px solid #7d6647",
     boxShadow: given
-      ? "inset 0 1px 0 rgba(255,255,255,0.55), 0 8px 18px rgba(0,0,0,0.18)"
-      : "inset 0 1px 0 rgba(255,255,255,0.85), 0 8px 18px rgba(0,0,0,0.12)",
+      ? "inset 0 1px 0 rgba(255,255,255,0.38), 0 8px 18px rgba(0,0,0,0.18)"
+      : "inset 0 1px 0 rgba(255,255,255,0.42), 0 8px 18px rgba(0,0,0,0.14)",
   };
+}
+
+function getSolverTitle(activeSolver: SolverMethod): string {
+  if (activeSolver === "dfs") return "DFS Solver Metrics";
+  if (activeSolver === "dfs_heuristic") return "DFS + Heuristic Solver Metrics";
+  if (activeSolver === "astar") return "A* Solver Metrics";
+  if (activeSolver === "csp") return "CSP Solver Metrics";
+  if (activeSolver === "ga") return "GA Solver Metrics";
+  return "Solver Metrics";
+}
+
+function getSolverButtonClass(method: Exclude<SolverMethod, null>): string {
+  const base =
+    "rounded-full border text-[13px] md:text-sm text-amber-50 shadow-sm transition-all duration-200 disabled:opacity-70";
+
+  if (method === "dfs") {
+    return `${base} border-[#6a4624] bg-[linear-gradient(180deg,#7a5230_0%,#5f3f25_100%)] hover:bg-[linear-gradient(180deg,#89603a_0%,#6a4728_100%)]`;
+  }
+
+  if (method === "dfs_heuristic") {
+    return `${base} border-[#765126] bg-[linear-gradient(180deg,#8b6030_0%,#6c4826_100%)] hover:bg-[linear-gradient(180deg,#9a6b38_0%,#77502b_100%)]`;
+  }
+
+  if (method === "astar") {
+    return `${base} border-[#7c5a2c] bg-[linear-gradient(180deg,#946734_0%,#73502a_100%)] hover:bg-[linear-gradient(180deg,#a7753b_0%,#80582d_100%)]`;
+  }
+
+  if (method === "csp") {
+    return `${base} border-[#6f4e28] bg-[linear-gradient(180deg,#816037_0%,#654928_100%)] hover:bg-[linear-gradient(180deg,#8e6b40_0%,#70512c_100%)]`;
+  }
+
+  return `${base} border-[#5f4630] bg-[linear-gradient(180deg,#715645_0%,#574133_100%)] hover:bg-[linear-gradient(180deg,#7f6250_0%,#614939_100%)]`;
 }
 
 export default function HidatoFrontendApp() {
@@ -274,6 +319,14 @@ export default function HidatoFrontendApp() {
   const [basePuzzleGrid, setBasePuzzleGrid] = useState<HexGrid>(
     cloneGrid(puzzles.Easy.grid)
   );
+  const [puzzleMeta, setPuzzleMeta] = useState<{
+    difficulty: string;
+    board_size: string;
+    board_shape: number[];
+    clue_pattern: string;
+    clue_count: number;
+    clue_ratio: number;
+  } | null>(null);
   const [status, setStatus] = useState<string>(
     "Fill the board so consecutive numbers touch through hex neighbors."
   );
@@ -284,7 +337,10 @@ export default function HidatoFrontendApp() {
 
   const puzzle = useMemo(() => puzzles[difficulty], [difficulty]);
   const givenMask = useMemo(() => getGivenMask(basePuzzleGrid), [basePuzzleGrid]);
-  const totalPlayable = useMemo(() => getExpectedRange(basePuzzleGrid), [basePuzzleGrid]);
+  const totalPlayable = useMemo(
+    () => getExpectedRange(basePuzzleGrid),
+    [basePuzzleGrid]
+  );
   const filledCount = countFilled(grid);
   const duplicateWarning = hasDuplicates(grid);
 
@@ -305,13 +361,23 @@ export default function HidatoFrontendApp() {
         setDifficulty(level);
         setBasePuzzleGrid(cloneGrid(data.puzzle_grid));
         setGrid(cloneGrid(data.puzzle_grid));
+        setPuzzleMeta({
+          difficulty: data.difficulty,
+          board_size: data.board_size,
+          board_shape: data.board_shape,
+          clue_pattern: data.clue_pattern,
+          clue_count: data.clue_count,
+          clue_ratio: data.clue_ratio,
+        });
         setStatus(data.message || `${level} puzzle generated.`);
       } else {
         setStatus(data.message || `Could not generate ${level} puzzle.`);
       }
     } catch (error) {
       console.error("Backend generator error:", error);
-      setStatus("Could not connect to backend generator. Make sure FastAPI is running.");
+      setStatus(
+        "Could not connect to backend generator. Make sure FastAPI is running."
+      );
     } finally {
       setGeneratorLoading(false);
     }
@@ -351,15 +417,24 @@ export default function HidatoFrontendApp() {
     setStatus(result.message);
   };
 
-  const solveWithMethod = async (method: "dfs" | "csp") => {
+  const solveWithMethod = async (
+    method: "dfs" | "dfs_heuristic" | "astar" | "csp" | "ga"
+  ) => {
     setSolverLoading(true);
     setActiveSolver(method);
-    setStatus(
-      method === "dfs"
-        ? "Solving puzzle using DFS backtracking..."
-        : "Solving puzzle using CSP with propagation..."
-    );
     setSolverMetrics(null);
+
+    if (method === "dfs") {
+      setStatus("Solving puzzle using DFS backtracking...");
+    } else if (method === "dfs_heuristic") {
+      setStatus("Solving puzzle using DFS + heuristics...");
+    } else if (method === "astar") {
+      setStatus("Solving puzzle using A*...");
+    } else if (method === "csp") {
+      setStatus("Solving puzzle using CSP with propagation...");
+    } else {
+      setStatus("Solving puzzle using Genetic Algorithm...");
+    }
 
     try {
       const response = await fetch("http://127.0.0.1:8000/solve", {
@@ -370,6 +445,12 @@ export default function HidatoFrontendApp() {
         body: JSON.stringify({
           grid,
           method,
+          difficulty: puzzleMeta?.difficulty ?? difficulty.toLowerCase(),
+          board_size: puzzleMeta?.board_size ?? null,
+          board_shape: puzzleMeta?.board_shape ?? null,
+          clue_pattern: puzzleMeta?.clue_pattern ?? null,
+          clue_count: puzzleMeta?.clue_count ?? null,
+          clue_ratio: puzzleMeta?.clue_ratio ?? null,
         }),
       });
 
@@ -382,19 +463,30 @@ export default function HidatoFrontendApp() {
           nodes_expanded: data.nodes_expanded,
           backtracks: data.backtracks,
         });
-        setStatus(
-          data.message ||
-            (method === "dfs"
-              ? "Puzzle solved successfully with DFS."
-              : "Puzzle solved successfully with CSP.")
-        );
+
+        if (method === "dfs") {
+          setStatus(data.message || "Puzzle solved successfully with DFS.");
+        } else if (method === "dfs_heuristic") {
+          setStatus(data.message || "Puzzle solved successfully with DFS + heuristics.");
+        } else if (method === "astar") {
+          setStatus(data.message || "Puzzle solved successfully with A*.");
+        } else if (method === "csp") {
+          setStatus(data.message || "Puzzle solved successfully with CSP.");
+        } else {
+          setStatus(data.message || "Puzzle solved successfully with GA.");
+        }
       } else {
-        setStatus(
-          data.message ||
-            (method === "dfs"
-              ? "DFS could not solve this puzzle."
-              : "CSP could not solve this puzzle.")
-        );
+        if (method === "dfs") {
+          setStatus(data.message || "DFS could not solve this puzzle.");
+        } else if (method === "dfs_heuristic") {
+          setStatus(data.message || "DFS + heuristics could not solve this puzzle.");
+        } else if (method === "astar") {
+          setStatus(data.message || "A* could not solve this puzzle.");
+        } else if (method === "csp") {
+          setStatus(data.message || "CSP could not solve this puzzle.");
+        } else {
+          setStatus(data.message || "GA could not solve this puzzle.");
+        }
       }
     } catch (error) {
       console.error("Backend solver error:", error);
@@ -406,7 +498,7 @@ export default function HidatoFrontendApp() {
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,#2d1b12_0%,#16110d_45%,#0b0907_100%)] text-white">
-      <div className="max-w-7xl mx-auto px-4 py-6 md:px-8 md:py-10">
+      <div className="mx-auto max-w-7xl px-4 py-6 md:px-8 md:py-10">
         <div className="grid gap-6 lg:grid-cols-[1.18fr_0.82fr]">
           <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
             <Card className="overflow-hidden rounded-[28px] border border-amber-900/30 bg-[linear-gradient(180deg,rgba(64,39,24,0.94)_0%,rgba(32,21,15,0.97)_100%)] shadow-[0_25px_80px_rgba(0,0,0,0.45)]">
@@ -416,7 +508,7 @@ export default function HidatoFrontendApp() {
                     <CardTitle className="text-3xl font-bold tracking-tight text-amber-50">
                       Hidato Solver Playground
                     </CardTitle>
-                    <CardDescription className="mt-2 text-amber-100/80 text-base">
+                    <CardDescription className="mt-2 text-base text-amber-100/80">
                       A polished hex-board version for your AI project.
                     </CardDescription>
                   </div>
@@ -468,30 +560,38 @@ export default function HidatoFrontendApp() {
                   <Button
                     onClick={resetBoard}
                     disabled={generatorLoading || solverLoading}
-                    className="rounded-full bg-amber-100 text-stone-900 hover:bg-white"
+                    className="rounded-full bg-amber-100 text-stone-900 hover:bg-[#f4e7cf]"
                   >
-                    <RotateCcw className="mr-2 h-4 w-4" /> Reset
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                    Reset
                   </Button>
+
                   <Button
                     onClick={fillDemo}
                     disabled={generatorLoading || solverLoading}
                     variant="secondary"
                     className="rounded-full bg-stone-700 text-stone-100 hover:bg-stone-600"
                   >
-                    <Shuffle className="mr-2 h-4 w-4" /> Demo Fill
+                    <Shuffle className="mr-2 h-4 w-4" />
+                    Demo Fill
                   </Button>
+
                   <Button
                     onClick={checkBoard}
                     disabled={generatorLoading || solverLoading}
                     variant="outline"
                     className="rounded-full border-amber-700/60 bg-transparent text-amber-100 hover:bg-amber-900/30"
                   >
-                    <CheckCircle2 className="mr-2 h-4 w-4" /> Check Board
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                    Check Board
                   </Button>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-3">
                   <Button
                     onClick={() => solveWithMethod("dfs")}
                     disabled={solverLoading || generatorLoading}
-                    className="rounded-full bg-emerald-500 text-white hover:bg-emerald-400 disabled:opacity-70"
+                    className={getSolverButtonClass("dfs")}
                   >
                     {solverLoading && activeSolver === "dfs" ? (
                       <>
@@ -505,10 +605,47 @@ export default function HidatoFrontendApp() {
                       </>
                     )}
                   </Button>
+
+                  <Button
+                    onClick={() => solveWithMethod("dfs_heuristic")}
+                    disabled={solverLoading || generatorLoading}
+                    className={getSolverButtonClass("dfs_heuristic")}
+                  >
+                    {solverLoading && activeSolver === "dfs_heuristic" ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Solving DFS+H...
+                      </>
+                    ) : (
+                      <>
+                        <Bot className="mr-2 h-4 w-4" />
+                        Solve with DFS+H
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    onClick={() => solveWithMethod("astar")}
+                    disabled={solverLoading || generatorLoading}
+                    className={getSolverButtonClass("astar")}
+                  >
+                    {solverLoading && activeSolver === "astar" ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Solving A*...
+                      </>
+                    ) : (
+                      <>
+                        <Bot className="mr-2 h-4 w-4" />
+                        Solve with A*
+                      </>
+                    )}
+                  </Button>
+
                   <Button
                     onClick={() => solveWithMethod("csp")}
                     disabled={solverLoading || generatorLoading}
-                    className="rounded-full bg-sky-500 text-white hover:bg-sky-400 disabled:opacity-70"
+                    className={getSolverButtonClass("csp")}
                   >
                     {solverLoading && activeSolver === "csp" ? (
                       <>
@@ -522,12 +659,30 @@ export default function HidatoFrontendApp() {
                       </>
                     )}
                   </Button>
+
+                  <Button
+                    onClick={() => solveWithMethod("ga")}
+                    disabled={solverLoading || generatorLoading}
+                    className={getSolverButtonClass("ga")}
+                  >
+                    {solverLoading && activeSolver === "ga" ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Solving GA...
+                      </>
+                    ) : (
+                      <>
+                        <Bot className="mr-2 h-4 w-4" />
+                        Solve with GA
+                      </>
+                    )}
+                  </Button>
                 </div>
               </CardHeader>
 
               <CardContent className="p-4 md:p-6">
                 <div className="rounded-[28px] border border-[#695338] bg-[linear-gradient(180deg,#8c6a3a_0%,#6c4f2a_100%)] p-4 shadow-[inset_0_2px_14px_rgba(255,255,255,0.08)] md:p-6">
-                  <div className="rounded-[24px] border border-black/15 bg-[radial-gradient(circle_at_top,#b08852_0%,#8d6738_35%,#6b4f2b_100%)] p-3 md:p-5">
+                  <div className="rounded-[24px] border border-black/15 bg-[radial-gradient(circle_at_top,#aa8048_0%,#855f35_38%,#694a29_100%)] p-3 md:p-5">
                     <div className="min-w-[500px]">
                       {grid.map((row, r) => (
                         <div
@@ -555,7 +710,7 @@ export default function HidatoFrontendApp() {
                                     WebkitClipPath:
                                       "polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0% 50%)",
                                     background:
-                                      "linear-gradient(180deg, rgba(255,255,255,0.65) 0%, rgba(255,255,255,0) 70%)",
+                                      "linear-gradient(180deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 70%)",
                                   }}
                                 />
                                 {given ? (
@@ -593,10 +748,10 @@ export default function HidatoFrontendApp() {
               <CardHeader>
                 <CardTitle className="text-xl text-amber-50">Game Rules</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3 text-amber-100/85 leading-7">
+              <CardContent className="space-y-3 leading-7 text-amber-100/85">
                 <p>Fill the board with consecutive numbers from 1 to {totalPlayable}.</p>
                 <p>Each number must touch the next one through hex-cell neighbors.</p>
-                <p>Gold cells are fixed clues. Ivory cells are editable.</p>
+                <p>Gold cells are fixed clues. Parchment cells are editable.</p>
               </CardContent>
             </Card>
 
@@ -634,20 +789,21 @@ export default function HidatoFrontendApp() {
             <Card className="rounded-[26px] border border-amber-900/25 bg-[linear-gradient(180deg,rgba(55,35,24,0.96)_0%,rgba(25,18,14,0.98)_100%)] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
               <CardHeader>
                 <CardTitle className="text-xl text-amber-50">
-                  {activeSolver
-                    ? `${activeSolver.toUpperCase()} Solver Metrics`
-                    : "Solver Metrics"}
+                  {getSolverTitle(activeSolver)}
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3 text-amber-100/85 leading-7">
+              <CardContent className="space-y-3 leading-7 text-amber-100/85">
                 {solverMetrics ? (
                   <>
                     <p>Runtime: {solverMetrics.runtime_seconds.toFixed(6)} seconds</p>
-                    <p>Nodes Expanded: {solverMetrics.nodes_expanded}</p>
+                    <p>
+                      {activeSolver === "ga" ? "Fitness Evaluations" : "Nodes Expanded"}:{" "}
+                      {solverMetrics.nodes_expanded}
+                    </p>
                     <p>Backtracks: {solverMetrics.backtracks}</p>
                   </>
                 ) : (
-                  <p>No solver run yet. Click “Solve with DFS” or “Solve with CSP” to view metrics.</p>
+                  <p>No solver run yet. Click a solver button to view metrics.</p>
                 )}
               </CardContent>
             </Card>
@@ -656,7 +812,7 @@ export default function HidatoFrontendApp() {
               <CardHeader>
                 <CardTitle className="text-xl text-amber-50">Difficulty Notes</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3 text-amber-100/85 leading-7">
+              <CardContent className="space-y-3 leading-7 text-amber-100/85">
                 <p>Easy: smaller board, more guided clues.</p>
                 <p>Medium: wider board with fewer fixed numbers.</p>
                 <p>Hard: larger board and sparser clues.</p>

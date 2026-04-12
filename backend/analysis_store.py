@@ -25,3 +25,8 @@ def save_result(record: Dict[str, Any]) -> None:
     results.append(record)
     with open(RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
+
+
+def clear_results() -> None:
+    with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+        json.dump([], f, indent=2)

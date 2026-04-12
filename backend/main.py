@@ -6,20 +6,28 @@ from pydantic import BaseModel
 
 from hidato_backtracking import solve_hidato_grid
 from generator import generate_by_difficulty
+from adversarial_analysis import run_adversarial_search
 
 from csp_solver import solve_hidato_csp_grid
 GridType = List[List[Optional[int]]]
 
 from datetime import datetime
-from analysis_store import load_results, save_result
-
+from analysis_store import load_results, save_result, clear_results
+from solvers_registry import get_solver, get_available_solvers
+from astar_solver import solve_hidato_astar_grid
 # -----------------------------
 # Request / Response models
 # -----------------------------
 
 class SolveRequest(BaseModel):
     grid: GridType
-    method: Literal["dfs", "csp"] = "dfs"
+    method: Literal["dfs", "dfs_heuristic", "csp", "ga", "astar"] = "dfs"
+    difficulty: Optional[str] = None
+    board_size: Optional[str] = None
+    board_shape: Optional[List[int]] = None
+    clue_pattern: Optional[str] = None
+    clue_count: Optional[int] = None
+    clue_ratio: Optional[float] = None
 
 class SolveResponse(BaseModel):
     success: bool
@@ -90,39 +98,44 @@ def root():
 @app.post("/solve", response_model=SolveResponse)
 def solve_puzzle(request: SolveRequest):
     try:
-        if request.method == "dfs":
-            result = solve_hidato_grid(request.grid)
-        elif request.method == "csp":
-            result = solve_hidato_csp_grid(request.grid)
-        else:
-            return SolveResponse(
-                success=False,
-                solved_grid=None,
-                runtime_seconds=0.0,
-                nodes_expanded=0,
-                backtracks=0,
-                message=f"Method '{request.method}' not implemented yet",
-            )
+        solver_fn = get_solver(request.method)
+        result = solver_fn(request.grid)
 
-        clue_count = sum(
-            1 for row in request.grid for cell in row if cell is not None
+        clue_count = (
+            request.clue_count
+            if request.clue_count is not None
+            else sum(1 for row in request.grid for cell in row if cell is not None)
         )
-        total_cells = sum(len(row) for row in request.grid)
-        clue_ratio = clue_count / total_cells if total_cells > 0 else 0.0
-        board_shape = [len(row) for row in request.grid]
 
-        if total_cells <= 19:
-            board_size = "small"
-        elif total_cells <= 24:
-            board_size = "medium"
+        total_cells = sum(len(row) for row in request.grid)
+
+        clue_ratio = (
+            request.clue_ratio
+            if request.clue_ratio is not None
+            else (clue_count / total_cells if total_cells > 0 else 0.0)
+        )
+
+        board_shape = (
+            request.board_shape
+            if request.board_shape is not None
+            else [len(row) for row in request.grid]
+        )
+
+        if request.board_size is not None:
+            board_size = request.board_size
         else:
-            board_size = "large"
+            if total_cells <= 19:
+                board_size = "small"
+            elif total_cells <= 24:
+                board_size = "medium"
+            else:
+                board_size = "large"
 
         puzzle_id = f"{request.method}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
 
         save_result({
             "puzzle_id": puzzle_id,
-            "difficulty": "unknown",
+            "difficulty": request.difficulty or "unknown",
             "algorithm": request.method,
             "success": result.success,
             "runtime_seconds": result.metrics.runtime_seconds,
@@ -132,7 +145,7 @@ def solve_puzzle(request: SolveRequest):
             "clue_ratio": clue_ratio,
             "board_size": board_size,
             "board_shape": board_shape,
-            "clue_pattern": "unknown",
+            "clue_pattern": request.clue_pattern or "unknown",
             "source": "ui",
             "timestamp": datetime.utcnow().isoformat(),
         })
@@ -156,7 +169,9 @@ def solve_puzzle(request: SolveRequest):
             message=f"Error: {str(e)}",
         )
 
-
+@app.get("/solvers")
+def get_solvers():
+    return {"solvers": get_available_solvers()}
 # -----------------------------
 # Generate endpoint
 # -----------------------------
@@ -196,3 +211,12 @@ def generate_puzzle(difficulty: Literal["easy", "medium", "hard"] = "easy"):
 @app.get("/results")
 def get_results():
     return load_results()
+
+@app.delete("/results")
+def delete_results():
+    clear_results()
+    return {"message": "Results history cleared successfully."}
+
+@app.post("/run-adversarial")
+def run_adversarial(top_k: int = 10, timeout_seconds: float = 15.0):
+    return run_adversarial_search(top_k=top_k, timeout_seconds=timeout_seconds)
